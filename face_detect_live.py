@@ -1,45 +1,45 @@
-import cv2
-import face_recognition
+import cv2 
+import face_recognition 
+import pickle 
 
-# Open webcam 
-video_capture = cv2.VideoCapture(0)
+with open("encodings.pkl", "rb") as f:
+    known_encodings, known_names = pickle.load(f)
 
-if not video_capture.isOpened():
-    print("Could not open webcam.")
-    exit()
+print("Encodings loaded successfully.")
 
-print("Webcam opened successfully. Press 'q' to quit")
+video = cv2.VideoCapture(0)
 
 while True:
-    ret, frame = video_capture.read()
+    ret, frame = video.read()
     if not ret:
-        print("Frame not captured, check camera connection.")
         break
 
-    # Resize frame for faster processing
     small_frame = cv2.resize(frame, (0, 0), fx=0.25, fy=0.25)
+    rgb_small = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
 
-    # Convert from BGR (OpenCV) to RGB (face_recognition)
-    rgb_small_frame = small_frame[:, :, ::-1]
+    face_locations = face_recognition.face_locations(rgb_small)
+    face_encodings = face_recognition.face_encodings(rgb_small, face_locations)
 
-    # Detect faces
-    face_locations = face_recognition.face_locations(rgb_small_frame)
+    for (top, right, bottom, left), face_encoding in zip(face_locations, face_encodings):
+        matches = face_recognition.compare_faces(known_encodings, face_encoding)
+        name = "Unknown"
 
-    # Draw rectangles around detected faces
-    for (top, right, bottom, left) in face_locations:
-        # Scale back up since we resized
+        if True in matches:
+            match_index = matches.index(True)
+            name = known_names[match_index]
+
         top *= 4
         right *= 4
         bottom *= 4
         left *= 4
+
         cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
+        cv2.putText(frame, name, (left, top - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
 
-    # Display the result
-    cv2.imshow('Smart Doorbell - Live Feed', frame)
+    cv2.imshow("Face Recognition", frame)
 
-    # Exit when 'q' is pressed
-    if cv2.waitKey(1) & 0xFF == ord('q'):
+    if cv2.waitKey(1) & 0xFF == ord("q"):
         break
 
-video_capture.release()
+video.release()
 cv2.destroyAllWindows()
