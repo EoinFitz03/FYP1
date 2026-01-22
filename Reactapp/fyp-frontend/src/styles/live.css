@@ -1,0 +1,74 @@
+/* src/styles/live.css */
+
+.gridTwoCol {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: 16px;
+  align-items: start;
+}
+
+.card {
+  background: white;
+  border-radius: 16px;
+  padding: 16px;
+  box-shadow: 0 1px 8px rgba(0,0,0,0.06);
+}
+
+.cardHeader {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.h2NoMargin {
+  margin: 0;
+}
+
+.statusPill {
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-size: 13px;
+}
+
+.statusConnected {
+  background: #d1fae5;
+}
+
+.statusDisconnected {
+  background: #fee2e2;
+}
+
+.videoWrap {
+  position: relative;
+  border-radius: 16px;
+  overflow: hidden;
+  background: #111;
+}
+
+.video {
+  width: 100%;
+  display: block;
+}
+
+.errorText {
+  color: crimson;
+}
+
+.primaryBtn {
+  width: 100%;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid #e5e5e5;
+  cursor: pointer;
+  font-weight: 700;
+  background: #fff;
+}
+
+.sectionTitle {
+  margin: 8px 0;
+}
+
+.smallText {
+  font-size: 14px;
+  line-height: 1.6;
+}

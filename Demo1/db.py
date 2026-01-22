@@ -14,14 +14,18 @@ class Database:
 
     def __init__(self, path="system.db"):
         self.path = path
+        # Single connection object used for all queries on this Database instance
         self.conn = sqlite3.connect(self.path)
+        # Open (or create) the SQLite database file
         self._create_tables()
+        # creates tables 
 
     # CREATE TABLES
     def _create_tables(self):
         cur = self.conn.cursor()
 
         # USERS TABLE
+         # Stores one row per person (name/role/timestamp)
         cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -32,6 +36,7 @@ class Database:
         """)
 
         # FACE ENCODINGS TABLE
+        # Stores face encodings (the 128 numbers) linked to a user_id
         cur.execute("""
         CREATE TABLE IF NOT EXISTS face_encodings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -43,6 +48,7 @@ class Database:
         """)
 
         # EVENTS TABLE (optional but great for logs)
+        # Stores logs of "user did gesture at time"
         cur.execute("""
         CREATE TABLE IF NOT EXISTS events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -52,7 +58,7 @@ class Database:
             ts TEXT NOT NULL
         )
         """)
-
+        # saves changes 
         self.conn.commit()
 
     # USERS
@@ -60,16 +66,22 @@ class Database:
         """Add a user and return their new user_id."""
         cur = self.conn.cursor()
         cur.execute(
-            "INSERT INTO users (name, role, created_at) VALUES (?, ?, ?)",
+            "INSERT INTO users (name, role, created_at) VALUES (?, ?, ?)", 
+            # add new roles to users, name ,role,craeted at 
             (name, role, datetime.utcnow().isoformat())
+            # gets teh UTC for the time and date 
         )
         self.conn.commit()
-        return cur.lastrowid
+        return cur.lastrowid #new user id 
 
     def get_user_id(self, name):
         """Return user_id for a given name, or None if not found."""
         cur = self.conn.cursor()
+         # Find the user id for the given name
         cur.execute("SELECT id FROM users WHERE name = ?", (name,))
+        # fetchone() returns:
+        # - a tuple like (3,) if a row exists
+        # - None if nothing matched
         row = cur.fetchone()
         return row[0] if row else None
 
@@ -80,8 +92,12 @@ class Database:
         Encoding is stored as JSON so it's easy to load back.
         """
         encoding_json = json.dumps(encoding.tolist())
+        # datase does not understand numpy this turns it inot a python list 
+         # numpy array -> Python list -> JSON string
 
         cur = self.conn.cursor()
+        # created cursor to talk to the DB 
+         # Insert new encoding row linked to user_id
         cur.execute(
             "INSERT INTO face_encodings (user_id, encoding, created_at) VALUES (?, ?, ?)",
             (user_id, encoding_json, datetime.utcnow().isoformat())
@@ -100,13 +116,20 @@ class Database:
         FROM face_encodings
         JOIN users ON face_encodings.user_id = users.id
         """)
+        # Match each face encoding with the user row where users.id equals face_encodings.user_id
 
         rows = cur.fetchall()
         names = []
         encodings = []
+        # Take this user’s face vector, 
+        # convert it to text, and save it as a row in the face_encodings table.
 
         for name, enc_json in rows:
+        # Convert the JSON string back into a Python list,
+        # then convert that list into a numpy array of floats.
+        # This gives us the original 128-D face encoding as a numpy array.
             arr = np.array(json.loads(enc_json), dtype=np.float64)
+             # numpy array -> Python list -> JSON string
             names.append(name)
             encodings.append(arr)
 

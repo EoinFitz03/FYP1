@@ -7,23 +7,35 @@ from db import Database
 def enrol_person(name, num_samples=10):
     db = Database("system.db")
 
+    """
+    Enrols a person by:
+    1) Opening the webcam
+    2) Capturing `num_samples` face encodings for that person
+    3) Averaging them (more stable than one sample)
+    4) Saving the averaged encoding into the database under that user's id
+    """
+
+    # takes in the name and the number of samples to the database
+
     # Check if user already exists
     user_id = db.get_user_id(name)
     if user_id is None:
         user_id = db.add_user(name)
+        # creates new user 
         print(f"Created new user '{name}' with id {user_id}")
     else:
         print(f"Adding more encodings for existing user '{name}' (id {user_id})")
 
+    # opens webcam 
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         print("Error: Could not open camera.")
         return
 
-    collected = []
+    collected = [] # preparing to collect encodings 
     print("Look at the camera. Press 'q' to cancel.")
 
-    while len(collected) < num_samples:
+    while len(collected) < num_samples: # runs loop until it gets to th enum smaples
         ret, frame = cap.read()
         if not ret:
             break
@@ -33,7 +45,7 @@ def enrol_person(name, num_samples=10):
 
         # Downscale for speed
         small = cv2.resize(frame, (0, 0), fx=0.25, fy=0.25)
-        rgb_small = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
+        rgb_small = cv2.cvtColor(small, cv2.COLOR_BGR2RGB) # openCV uses BGR colours 
 
         face_locations = face_recognition.face_locations(rgb_small)
         face_encodings = face_recognition.face_encodings(rgb_small, face_locations)
