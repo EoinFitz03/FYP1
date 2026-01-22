@@ -1,0 +1,40 @@
+/* src/styles/layout.css */
+
+.appShell {
+  display: flex;
+  min-height: 100vh;
+  font-family: system-ui, Arial, sans-serif;
+}
+
+.sidebar {
+  width: 220px;
+  padding: 16px;
+  border-right: 1px solid #e5e5e5;
+  background: #fff;
+}
+
+.sidebarTitle {
+  margin-top: 0;
+}
+
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.navLink {
+  text-decoration: none;
+  color: #111;
+  font-weight: 400;
+}
+
+.navLinkActive {
+  font-weight: 700;
+}
+
+.main {
+  flex: 1;
+  padding: 20px;
+  background: #f7f7f7;
+}

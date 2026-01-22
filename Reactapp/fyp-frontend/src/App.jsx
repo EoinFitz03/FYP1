@@ -1,35 +1,63 @@
-import { useState } from 'react'
-import reactLogo from './assets/react.svg'
-import viteLogo from '/vite.svg'
-import './App.css'
+import { BrowserRouter, Routes, Route, NavLink } from "react-router-dom";
+import Live from "./pages/Live";
+import Simulation from "./pages/Simulation";
+import Enroll from "./pages/Enroll";
+import Results from "./pages/Results";
 
-function App() {
-  const [count, setCount] = useState(0)
+import "./styles/layout.css";
 
+function Layout({ children }) {
   return (
-    <>
-      <div>
-        <a href="https://vite.dev" target="_blank">
-          <img src={viteLogo} className="logo" alt="Vite logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <h1>Vite + React</h1>
-      <div className="card">
-        <button onClick={() => setCount((count) => count + 1)}>
-          count is {count}
-        </button>
-        <p>
-          Edit <code>src/App.jsx</code> and save to test HMR
-        </p>
-      </div>
-      <p className="read-the-docs">
-        Click on the Vite and React logos to learn more
-      </p>
-    </>
-  )
+    <div className="appShell">
+      <aside className="sidebar">
+        <h2 className="sidebarTitle">FYP</h2>
+
+        <nav className="nav">
+          <NavLink
+            to="/"
+            end
+            className={({ isActive }) => (isActive ? "navLink navLinkActive" : "navLink")}
+          >
+            Live
+          </NavLink>
+
+          <NavLink
+            to="/enroll"
+            className={({ isActive }) => (isActive ? "navLink navLinkActive" : "navLink")}
+          >
+            Enroll
+          </NavLink>
+
+          <NavLink
+            to="/simulation"
+            className={({ isActive }) => (isActive ? "navLink navLinkActive" : "navLink")}
+          >
+            Simulation
+          </NavLink>
+
+          <NavLink
+            to="/results"
+            className={({ isActive }) => (isActive ? "navLink navLinkActive" : "navLink")}
+          >
+            Results
+          </NavLink>
+        </nav>
+      </aside>
+
+      <main className="main">{children}</main>
+    </div>
+  );
 }
 
-export default App
+export default function App() {
+  return (
+    <BrowserRouter>
+      <Routes>
+        <Route path="/" element={<Layout><Live /></Layout>} />
+        <Route path="/enroll" element={<Layout><Enroll /></Layout>} />
+        <Route path="/simulation" element={<Layout><Simulation /></Layout>} />
+        <Route path="/results" element={<Layout><Results /></Layout>} />
+      </Routes>
+    </BrowserRouter>
+  );
+}
