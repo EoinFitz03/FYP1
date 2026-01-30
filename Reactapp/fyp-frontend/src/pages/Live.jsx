@@ -20,9 +20,12 @@ export default function Live() {
   useEffect(() => {
     (async () => {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: true,
+          audio: false,
+        });
         if (videoRef.current) videoRef.current.srcObject = stream;
-      } catch (e) {
+      } catch {
         setErr("Could not access webcam. Check permissions.");
       }
     })();
@@ -45,7 +48,9 @@ export default function Live() {
         try {
           const msg = JSON.parse(data);
           if (msg.type === "result") setResult(msg.payload);
-        } catch {}
+        } catch {
+          // ignore
+        }
       },
     });
   };
@@ -60,10 +65,13 @@ export default function Live() {
     const ws = wsRef.current;
     const video = videoRef.current;
     const canvas = canvasRef.current;
+
     if (!ws || ws.readyState !== 1 || !video || !canvas) return;
+    if (video.readyState < 2) return;
 
     const w = 640;
     const h = 360;
+
     canvas.width = w;
     canvas.height = h;
 
@@ -72,6 +80,7 @@ export default function Live() {
 
     const dataUrl = canvas.toDataURL("image/jpeg", 0.6);
     const base64 = dataUrl.split(",")[1];
+
     ws.send(JSON.stringify({ type: "frame", data: base64 }));
   };
 
@@ -80,13 +89,12 @@ export default function Live() {
     connectWS();
     setRunning(true);
 
+    // ~2.8 FPS (stable). If latency stays stable you can try 300ms later.
     timerRef.current = setInterval(() => {
       const ws = wsRef.current;
       if (!ws || ws.readyState !== 1) return;
-
-      if (videoRef.current?.readyState >= 2) sendFrame();
-      else ws.send(JSON.stringify({ type: "ping" }));
-    }, 140);
+      sendFrame();
+    }, 350);
   };
 
   const stop = () => {
@@ -126,8 +134,11 @@ export default function Live() {
           <h4 className="sectionTitle">Current Result</h4>
           <div className="smallText">
             <div><b>Person:</b> {result?.person ?? "—"}</div>
+            <div><b>Face conf:</b> {result?.face_conf ?? 0}</div>
             <div><b>Gesture:</b> {result?.gesture ?? "—"}</div>
+            <div><b>Gesture conf:</b> {result?.gesture_conf ?? 0}</div>
             <div><b>Latency:</b> {result?.latency_ms ?? "—"} ms</div>
+            <div><b>Distance:</b> {result?.distance ?? "—"}</div>
           </div>
         </div>
       </div>
