@@ -2,14 +2,10 @@ import os
 import sys
 import json
 import time
-import base64
-from typing import Any, Dict, List, Tuple, Optional
+from typing import Any, Dict, List
 from collections import deque, Counter
 
-import cv2
 import numpy as np
-import face_recognition
-
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -19,63 +15,44 @@ from fastapi.middleware.cors import CORSMiddleware
 APP_DIR = os.path.dirname(__file__)
 ROOT_DIR = os.path.abspath(os.path.join(APP_DIR, ".."))
 DEMO1_DIR = os.path.join(ROOT_DIR, "Demo1")
+HAND_DIR = os.path.join(ROOT_DIR, "HandGestures")
 
+# Make Demo1 + HandGestures importable 
 sys.path.insert(0, DEMO1_DIR)
-from db import Database  # Demo1/db.py
+sys.path.insert(0, HAND_DIR)
 
 DB_PATH = os.path.join(DEMO1_DIR, "system.db")
 
 # ----------------------------
-# Hand Gestures (reuse your existing HandGestures demo)
-# ----------------------------
-HAND_DIR = os.path.join(ROOT_DIR, "HandGestures")
-sys.path.insert(0, HAND_DIR)
-
-try:
-    from gestures_live import (
-        mp_hands,
-        classify_gesture,
-        Gesture,
-        MIN_DET_CONF,
-        MIN_TRK_CONF,
-        MODEL_COMPLEXITY,
-        MAX_HANDS,
-    )
-except Exception as e:
-    mp_hands = None
-    classify_gesture = None
-    Gesture = None
-    MIN_DET_CONF = 0.5
-    MIN_TRK_CONF = 0.5
-    MODEL_COMPLEXITY = 0
-    MAX_HANDS = 1
-    print(f"[backend] Gesture imports failed: {e}")
-
-# ----------------------------
-# Face tuning parameters
+# Real-time tuning parameters 
 # ----------------------------
 TOLERANCE = 0.50
 DOWNSCALE = 0.50
 MODEL = "hog"
 
-# ----------------------------
-# Real-time performance controls
-# ----------------------------
-FACE_EVERY_N_FRAMES = 2          # run face recognition every 2 frames
-GESTURE_EVERY_N_FRAMES = 4       # run gesture detection every 4 frames
-GESTURE_SMALL_WIDTH = 320        # run MediaPipe on resized image
-GESTURE_SMOOTH_WINDOW = 5        # vote smoothing window
-GESTURE_MIN_VOTES = 2            # must appear at least this many times in window
+FACE_EVERY_N_FRAMES = 2
+GESTURE_SMALL_WIDTH = 320
+GESTURE_SMOOTH_WINDOW = 5
+GESTURE_MIN_VOTES = 2
 
-# "Hold" logic to prevent flicker
-HAND_LOST_MS = 1200           # hold gesture longer before clearing
-HAND_MISS_CLEAR_COUNT = 6     # need more consecutive misses to clear
-GESTURE_EVERY_N_FRAMES = 3    # check gestures a bit more often
-FACE_LOST_MS = 800  # keep last face ID for 0.8s when face is briefly lost (hand up / occlusion)
+HAND_LOST_MS = 1200
+HAND_MISS_CLEAR_COUNT = 6
+GESTURE_EVERY_N_FRAMES = 3
+FACE_LOST_MS = 800
+
+# Enrol capture spacing 
+ENROL_MIN_MS_BETWEEN_CAPTURES = 250
+
+# ----------------------------
+# Services
+# ----------------------------
+from services.frame_service import decode_base64_jpeg
+from services.face_service import FaceService
+from services.gesture_service import GestureService
+from services.enrol_service import EnrolService
 
 
 app = FastAPI()
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173"],
@@ -84,188 +61,63 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-known_encodings: List[np.ndarray] = []
-known_names: List[str] = []
-hands_detector = None
-
-
-def load_known_faces_from_db(db_path: str) -> Tuple[List[np.ndarray], List[str]]:
-    db = Database(db_path)
-    encs, names = db.load_all_encodings()
-    encs = [np.asarray(e) for e in encs]
-    names = [str(n) for n in names]
-    return encs, names
+# Global services loaded once, reused by websocket
+face_svc: FaceService | None = None
+gesture_svc: GestureService | None = None
+enrol_svc: EnrolService | None = None
 
 
 @app.on_event("startup")
 def startup() -> None:
-    global known_encodings, known_names, hands_detector
+    global face_svc, gesture_svc, enrol_svc
 
-    # Load face encodings
-    if not os.path.exists(DB_PATH):
-        print(f"[backend] ERROR: DB not found at {DB_PATH}")
-        known_encodings, known_names = [], []
-    else:
-        try:
-            known_encodings, known_names = load_known_faces_from_db(DB_PATH)
-            print(f"[backend] Loaded {len(known_encodings)} encodings from {DB_PATH}")
-        except Exception as e:
-            print(f"[backend] Failed loading encodings: {e}")
-            known_encodings, known_names = [], []
+    face_svc = FaceService(
+        db_path=DB_PATH,
+        tolerance=TOLERANCE,
+        downscale=DOWNSCALE,
+        model=MODEL,
+    )
+    face_svc.load_known_faces()  # loads encodings into memory 
 
-    # Init MediaPipe Hands
-    try:
-        if mp_hands is not None:
-            hands_detector = mp_hands.Hands(
-                model_complexity=0,          # IMPORTANT: 0 is fastest
-                max_num_hands=1,             # IMPORTANT: one hand for speed
-                min_detection_confidence=MIN_DET_CONF,
-                min_tracking_confidence=MIN_TRK_CONF,
-            )
-            print("[backend] MediaPipe Hands initialised")
-        else:
-            hands_detector = None
-            print("[backend] MediaPipe Hands not available (imports failed)")
-    except Exception as e:
-        hands_detector = None
-        print(f"[backend] Failed to initialise MediaPipe Hands: {e}")
+    gesture_svc = GestureService(
+        gesture_small_width=GESTURE_SMALL_WIDTH
+    )
+    gesture_svc.startup()  # sets up mediapipe hands if available
+
+    enrol_svc = EnrolService(
+        db_path=DB_PATH,
+        model=MODEL,
+        min_ms_between_captures=ENROL_MIN_MS_BETWEEN_CAPTURES,
+        on_saved=face_svc.load_known_faces,  # reload encodings after enroll
+    )
 
 
 @app.on_event("shutdown")
 def shutdown() -> None:
-    global hands_detector
-    try:
-        if hands_detector is not None:
-            hands_detector.close()
-            hands_detector = None
-    except Exception:
-        pass
-
-
-def decode_base64_jpeg(base64_jpeg: str) -> Optional[np.ndarray]:
-    try:
-        jpg_bytes = base64.b64decode(base64_jpeg)
-        arr = np.frombuffer(jpg_bytes, dtype=np.uint8)
-        return cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    except Exception:
-        return None
-
-
-def recognize_person(bgr: np.ndarray) -> Dict[str, Any]:
-    if len(known_encodings) == 0:
-        return {"person": "Unknown", "face_conf": 0.0, "distance": None}
-
-    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-
-    if DOWNSCALE != 1.0:
-        rgb_small = cv2.resize(rgb, (0, 0), fx=DOWNSCALE, fy=DOWNSCALE)
-    else:
-        rgb_small = rgb
-
-    locations = face_recognition.face_locations(rgb_small, model=MODEL)
-    if not locations:
-        return {"person": "Unknown", "face_conf": 0.0, "distance": None}
-
-    encs = face_recognition.face_encodings(rgb_small, locations)
-    if not encs:
-        return {"person": "Unknown", "face_conf": 0.0, "distance": None}
-
-    best_name = "Unknown"
-    best_dist = 999.0
-
-    for enc in encs:
-        distances = face_recognition.face_distance(known_encodings, enc)
-        if len(distances) == 0:
-            continue
-        i = int(np.argmin(distances))
-        d = float(distances[i])
-        if d < best_dist:
-            best_dist = d
-            best_name = known_names[i] if d <= TOLERANCE else "Unknown"
-
-    if best_dist == 999.0:
-        return {"person": "Unknown", "face_conf": 0.0, "distance": None}
-
-    conf = max(0.0, min(1.0, 1.0 - (best_dist / TOLERANCE)))
-    return {"person": best_name, "face_conf": round(conf, 3), "distance": round(best_dist, 4)}
-
-
-def detect_gesture_fast(bgr: np.ndarray) -> Dict[str, Any]:
-    """Run MediaPipe on a smaller image for speed, then classify."""
-    if hands_detector is None or classify_gesture is None:
-        return {"gesture": "—", "gesture_conf": 0.0}
-
-    h, w = bgr.shape[:2]
-    if w > GESTURE_SMALL_WIDTH:
-        scale = GESTURE_SMALL_WIDTH / float(w)
-        small = cv2.resize(bgr, (GESTURE_SMALL_WIDTH, int(h * scale)))
-    else:
-        small = bgr
-
-    rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
-    res = hands_detector.process(rgb)
-
-    if not res.multi_hand_landmarks:
-        return {"gesture": "—", "gesture_conf": 0.0}
-
-    try:
-        g = classify_gesture(res.multi_hand_landmarks[0])
-        if Gesture is not None and g == Gesture.UNKNOWN:
-            return {"gesture": "—", "gesture_conf": 0.0}
-
-        label = str(g.value) if hasattr(g, "value") else str(g)
-        return {"gesture": label, "gesture_conf": 1.0}
-    except Exception:
-        return {"gesture": "—", "gesture_conf": 0.0}
-
-
-def extract_single_face_encoding(bgr: np.ndarray) -> Optional[np.ndarray]:
-    """
-    Enrol helper: take one incoming frame and return ONE face encoding.
-    Reject frames with 0 faces or >1 face to avoid enrolling the wrong person.
-    """
-    small = cv2.resize(bgr, (0, 0), fx=0.25, fy=0.25)
-    rgb_small = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
-
-    locs = face_recognition.face_locations(rgb_small, model=MODEL)
-    if not locs:
-        return None
-
-    encs = face_recognition.face_encodings(rgb_small, locs)
-    if not encs:
-        return None
-
-    if len(encs) != 1:
-        return None
-
-    return encs[0]
+    global gesture_svc
+    if gesture_svc is not None:
+        gesture_svc.shutdown()
 
 
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
     await ws.accept()
 
+    assert face_svc is not None, "FaceService not initialised"
+    assert gesture_svc is not None, "GestureService not initialised"
+    assert enrol_svc is not None, "EnrolService not initialised"
+
     frame_i = 0
 
     # Reuse last results between heavy runs
-    last_face = {"person": "Unknown", "face_conf": 0.0, "distance": None}
+    last_face: Dict[str, Any] = {"person": "Unknown", "face_conf": 0.0, "distance": None}
     last_face_seen = 0.0
 
-    last_gesture = {"gesture": "—", "gesture_conf": 0.0}
+    last_gesture: Dict[str, Any] = {"gesture": "—", "gesture_conf": 0.0}
     gesture_hist = deque(maxlen=GESTURE_SMOOTH_WINDOW)
 
     last_hand_seen = 0.0
     hand_miss_count = 0
-
-    # ----------------------------
-    # Enrol state 
-    # ----------------------------
-    enrol_active = False
-    enrol_name = ""
-    enrol_target = 10
-    enrol_collected: List[np.ndarray] = []
-    enrol_last_capture = 0.0
-    ENROL_MIN_MS_BETWEEN_CAPTURES = 250
 
     try:
         while True:
@@ -280,52 +132,22 @@ async def ws_endpoint(ws: WebSocket):
             mtype = msg.get("type")
 
             # ----------------------------
-            # Enrol controls (new)
+            # Enrol controls 
             # ----------------------------
             if mtype == "enrol_start":
-                enrol_name = str(msg.get("name", "")).strip()
-                enrol_target = int(msg.get("num_samples", 10))
-                enrol_target = max(3, min(30, enrol_target))
+                name = str(msg.get("name", "")).strip()
+                target = int(msg.get("num_samples", 10))
+                status = enrol_svc.start(name=name, num_samples=target)
 
-                enrol_collected = []
-                enrol_active = bool(enrol_name)
-                enrol_last_capture = 0.0
-
-                await ws.send_text(json.dumps({
-                    "type": "enrol_status",
-                    "payload": {
-                        "active": enrol_active,
-                        "name": enrol_name,
-                        "captured": 0,
-                        "target": enrol_target,
-                        "done": False,
-                        "error": None if enrol_active else "missing_name",
-                        "ts": time.time(),
-                    }
-                }))
+                await ws.send_text(json.dumps({"type": "enrol_status", "payload": status}))
                 continue
 
             if mtype == "enrol_cancel":
-                enrol_active = False
-                enrol_name = ""
-                enrol_collected = []
-                enrol_last_capture = 0.0
-
-                await ws.send_text(json.dumps({
-                    "type": "enrol_status",
-                    "payload": {
-                        "active": False,
-                        "name": "",
-                        "captured": 0,
-                        "target": 0,
-                        "done": False,
-                        "error": "cancelled",
-                        "ts": time.time(),
-                    }
-                }))
+                status = enrol_svc.cancel()
+                await ws.send_text(json.dumps({"type": "enrol_status", "payload": status}))
                 continue
 
-            # Existing behaviour: if not a frame, return current result snapshot
+            # If not a frame, return current snapshot (UNCHANGED)
             if mtype != "frame":
                 await ws.send_text(json.dumps({
                     "type": "result",
@@ -345,6 +167,7 @@ async def ws_endpoint(ws: WebSocket):
 
             base64jpeg = msg.get("data", "")
             bgr = decode_base64_jpeg(base64jpeg)
+
             if bgr is None:
                 await ws.send_text(json.dumps({
                     "type": "result",
@@ -362,93 +185,40 @@ async def ws_endpoint(ws: WebSocket):
                 continue
 
             # ----------------------------
-            # Enrol capture (new)
+            # Enrol capture 
             # ----------------------------
-            if enrol_active:
-                now = time.time()
-                if (now - enrol_last_capture) * 1000.0 >= ENROL_MIN_MS_BETWEEN_CAPTURES:
-                    enc = extract_single_face_encoding(bgr)
-                    if enc is not None:
-                        enrol_collected.append(enc)
-                        enrol_last_capture = now
+            if enrol_svc.active:
+                enrol_update = enrol_svc.try_capture(bgr)
+                if enrol_update is not None:
+                    await ws.send_text(json.dumps({"type": "enrol_status", "payload": enrol_update}))
 
-                        await ws.send_text(json.dumps({
-                            "type": "enrol_status",
-                            "payload": {
-                                "active": True,
-                                "name": enrol_name,
-                                "captured": len(enrol_collected),
-                                "target": enrol_target,
-                                "done": False,
-                                "error": None,
-                                "ts": time.time(),
-                            }
-                        }))
-
-                        if len(enrol_collected) >= enrol_target:
-                            mean_encoding = np.mean(enrol_collected, axis=0)
-
-                            db = Database(DB_PATH)
-                            user_id = db.get_user_id(enrol_name)
-                            if user_id is None:
-                                user_id = db.add_user(enrol_name)
-                            db.add_face_encoding(user_id, mean_encoding)
-                            db.close()
-
-                            # reload so Live works instantly
-                            global known_encodings, known_names
-                            known_encodings, known_names = load_known_faces_from_db(DB_PATH)
-
-                            enrol_active = False
-                            enrol_name = ""
-                            enrol_collected = []
-                            enrol_last_capture = 0.0
-
-                            await ws.send_text(json.dumps({
-                                "type": "enrol_status",
-                                "payload": {
-                                    "active": False,
-                                    "name": "",
-                                    "captured": enrol_target,
-                                    "target": enrol_target,
-                                    "done": True,
-                                    "error": None,
-                                    "ts": time.time(),
-                                }
-                            }))
-
-            # -------- Face (every N frames) --------
+            # -------- Face every N frames --------
             if frame_i % FACE_EVERY_N_FRAMES == 0:
-                new_face = recognize_person(bgr)
+                new_face = face_svc.recognize_person(bgr)
 
-                # If we got a real person, update and mark seen time
                 if new_face["person"] != "Unknown":
                     last_face = new_face
                     last_face_seen = time.time()
                 else:
-                    # Hold previous face briefly if it was seen recently (prevents flicker)
                     if last_face["person"] != "Unknown" and (time.time() - last_face_seen) * 1000.0 <= FACE_LOST_MS:
-                        pass  # keep last_face
+                        pass
                     else:
                         last_face = new_face
 
-            # -------- Gesture (every N frames) --------
+            # -------- Gesture every N frame --------
             if frame_i % GESTURE_EVERY_N_FRAMES == 0:
-                raw_g = detect_gesture_fast(bgr)
+                raw_g = gesture_svc.detect_gesture_fast(bgr)
 
                 if raw_g["gesture"] == "—":
-                    # don't clear on one miss; require consecutive misses
                     hand_miss_count += 1
                     if hand_miss_count >= HAND_MISS_CLEAR_COUNT:
                         last_gesture = {"gesture": "—", "gesture_conf": 0.0}
                         gesture_hist.clear()
                 else:
-                    # saw a hand again
                     hand_miss_count = 0
                     last_hand_seen = time.time()
                     gesture_hist.append(raw_g["gesture"])
 
-                    # vote smoothing
                     counts = Counter(gesture_hist)
                     best_gesture, best_votes = counts.most_common(1)[0]
 
@@ -457,9 +227,7 @@ async def ws_endpoint(ws: WebSocket):
                             "gesture": best_gesture,
                             "gesture_conf": round(best_votes / len(gesture_hist), 3),
                         }
-                    # else: keep last_gesture (don’t instantly blank)
 
-            # Extra safety: if we haven't seen a hand recently, force clear
             if last_gesture["gesture"] != "—":
                 if last_hand_seen == 0.0 or (time.time() - last_hand_seen) * 1000.0 > HAND_LOST_MS:
                     last_gesture = {"gesture": "—", "gesture_conf": 0.0}
