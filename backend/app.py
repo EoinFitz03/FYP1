@@ -219,6 +219,28 @@ def detect_gesture_fast(bgr: np.ndarray) -> Dict[str, Any]:
         return {"gesture": "—", "gesture_conf": 0.0}
 
 
+def extract_single_face_encoding(bgr: np.ndarray) -> Optional[np.ndarray]:
+    """
+    Enrol helper: take one incoming frame and return ONE face encoding.
+    Reject frames with 0 faces or >1 face to avoid enrolling the wrong person.
+    """
+    small = cv2.resize(bgr, (0, 0), fx=0.25, fy=0.25)
+    rgb_small = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
+
+    locs = face_recognition.face_locations(rgb_small, model=MODEL)
+    if not locs:
+        return None
+
+    encs = face_recognition.face_encodings(rgb_small, locs)
+    if not encs:
+        return None
+
+    if len(encs) != 1:
+        return None
+
+    return encs[0]
+
+
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
     await ws.accept()
@@ -235,6 +257,16 @@ async def ws_endpoint(ws: WebSocket):
     last_hand_seen = 0.0
     hand_miss_count = 0
 
+    # ----------------------------
+    # Enrol state 
+    # ----------------------------
+    enrol_active = False
+    enrol_name = ""
+    enrol_target = 10
+    enrol_collected: List[np.ndarray] = []
+    enrol_last_capture = 0.0
+    ENROL_MIN_MS_BETWEEN_CAPTURES = 250
+
     try:
         while True:
             raw = await ws.receive_text()
@@ -245,7 +277,56 @@ async def ws_endpoint(ws: WebSocket):
             except json.JSONDecodeError:
                 msg = {"type": "ping"}
 
-            if msg.get("type") != "frame":
+            mtype = msg.get("type")
+
+            # ----------------------------
+            # Enrol controls (new)
+            # ----------------------------
+            if mtype == "enrol_start":
+                enrol_name = str(msg.get("name", "")).strip()
+                enrol_target = int(msg.get("num_samples", 10))
+                enrol_target = max(3, min(30, enrol_target))
+
+                enrol_collected = []
+                enrol_active = bool(enrol_name)
+                enrol_last_capture = 0.0
+
+                await ws.send_text(json.dumps({
+                    "type": "enrol_status",
+                    "payload": {
+                        "active": enrol_active,
+                        "name": enrol_name,
+                        "captured": 0,
+                        "target": enrol_target,
+                        "done": False,
+                        "error": None if enrol_active else "missing_name",
+                        "ts": time.time(),
+                    }
+                }))
+                continue
+
+            if mtype == "enrol_cancel":
+                enrol_active = False
+                enrol_name = ""
+                enrol_collected = []
+                enrol_last_capture = 0.0
+
+                await ws.send_text(json.dumps({
+                    "type": "enrol_status",
+                    "payload": {
+                        "active": False,
+                        "name": "",
+                        "captured": 0,
+                        "target": 0,
+                        "done": False,
+                        "error": "cancelled",
+                        "ts": time.time(),
+                    }
+                }))
+                continue
+
+            # Existing behaviour: if not a frame, return current result snapshot
+            if mtype != "frame":
                 await ws.send_text(json.dumps({
                     "type": "result",
                     "payload": {
@@ -279,6 +360,62 @@ async def ws_endpoint(ws: WebSocket):
                     }
                 }))
                 continue
+
+            # ----------------------------
+            # Enrol capture (new)
+            # ----------------------------
+            if enrol_active:
+                now = time.time()
+                if (now - enrol_last_capture) * 1000.0 >= ENROL_MIN_MS_BETWEEN_CAPTURES:
+                    enc = extract_single_face_encoding(bgr)
+                    if enc is not None:
+                        enrol_collected.append(enc)
+                        enrol_last_capture = now
+
+                        await ws.send_text(json.dumps({
+                            "type": "enrol_status",
+                            "payload": {
+                                "active": True,
+                                "name": enrol_name,
+                                "captured": len(enrol_collected),
+                                "target": enrol_target,
+                                "done": False,
+                                "error": None,
+                                "ts": time.time(),
+                            }
+                        }))
+
+                        if len(enrol_collected) >= enrol_target:
+                            mean_encoding = np.mean(enrol_collected, axis=0)
+
+                            db = Database(DB_PATH)
+                            user_id = db.get_user_id(enrol_name)
+                            if user_id is None:
+                                user_id = db.add_user(enrol_name)
+                            db.add_face_encoding(user_id, mean_encoding)
+                            db.close()
+
+                            # reload so Live works instantly
+                            global known_encodings, known_names
+                            known_encodings, known_names = load_known_faces_from_db(DB_PATH)
+
+                            enrol_active = False
+                            enrol_name = ""
+                            enrol_collected = []
+                            enrol_last_capture = 0.0
+
+                            await ws.send_text(json.dumps({
+                                "type": "enrol_status",
+                                "payload": {
+                                    "active": False,
+                                    "name": "",
+                                    "captured": enrol_target,
+                                    "target": enrol_target,
+                                    "done": True,
+                                    "error": None,
+                                    "ts": time.time(),
+                                }
+                            }))
 
             # -------- Face (every N frames) --------
             if frame_i % FACE_EVERY_N_FRAMES == 0:
