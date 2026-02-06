@@ -52,7 +52,7 @@ except Exception as e:
     print(f"[backend] Gesture imports failed: {e}")
 
 # ----------------------------
-# Tuning parameters
+# Face tuning parameters
 # ----------------------------
 TOLERANCE = 0.50
 DOWNSCALE = 0.50
@@ -61,13 +61,18 @@ MODEL = "hog"
 # ----------------------------
 # Real-time performance controls
 # ----------------------------
-FACE_EVERY_N_FRAMES = 2          # run face recognition every 2 frames, reuse last in-between
-GESTURE_EVERY_N_FRAMES = 4       # run gesture detection every 4 frames, reuse last in-between
+FACE_EVERY_N_FRAMES = 2          # run face recognition every 2 frames
+GESTURE_EVERY_N_FRAMES = 4       # run gesture detection every 4 frames
 GESTURE_SMALL_WIDTH = 320        # run MediaPipe on resized image
 GESTURE_SMOOTH_WINDOW = 5        # vote smoothing window
 GESTURE_MIN_VOTES = 2            # must appear at least this many times in window
 
-HAND_LOST_MS = 500               # clear gesture ~0.5s after last detected hand
+# "Hold" logic to prevent flicker
+HAND_LOST_MS = 1200           # hold gesture longer before clearing
+HAND_MISS_CLEAR_COUNT = 6     # need more consecutive misses to clear
+GESTURE_EVERY_N_FRAMES = 3    # check gestures a bit more often
+FACE_LOST_MS = 800  # keep last face ID for 0.8s when face is briefly lost (hand up / occlusion)
+
 
 app = FastAPI()
 
@@ -222,13 +227,13 @@ async def ws_endpoint(ws: WebSocket):
 
     # Reuse last results between heavy runs
     last_face = {"person": "Unknown", "face_conf": 0.0, "distance": None}
-    last_gesture = {"gesture": "—", "gesture_conf": 0.0}
+    last_face_seen = 0.0
 
-    # Smooth gestures
+    last_gesture = {"gesture": "—", "gesture_conf": 0.0}
     gesture_hist = deque(maxlen=GESTURE_SMOOTH_WINDOW)
 
-    # For clearing “stuck” gestures
     last_hand_seen = 0.0
+    hand_miss_count = 0
 
     try:
         while True:
@@ -277,40 +282,52 @@ async def ws_endpoint(ws: WebSocket):
 
             # -------- Face (every N frames) --------
             if frame_i % FACE_EVERY_N_FRAMES == 0:
-                last_face = recognize_person(bgr)
-            # else reuse last_face
+                new_face = recognize_person(bgr)
+
+                # If we got a real person, update and mark seen time
+                if new_face["person"] != "Unknown":
+                    last_face = new_face
+                    last_face_seen = time.time()
+                else:
+                    # Hold previous face briefly if it was seen recently (prevents flicker)
+                    if last_face["person"] != "Unknown" and (time.time() - last_face_seen) * 1000.0 <= FACE_LOST_MS:
+                        pass  # keep last_face
+                    else:
+                        last_face = new_face
 
             # -------- Gesture (every N frames) --------
             if frame_i % GESTURE_EVERY_N_FRAMES == 0:
                 raw_g = detect_gesture_fast(bgr)
 
-                # If no hand detected, clear quickly (prevents “sticking”)
                 if raw_g["gesture"] == "—":
-                    gesture_hist.clear()
+                    # don't clear on one miss; require consecutive misses
+                    hand_miss_count += 1
+                    if hand_miss_count >= HAND_MISS_CLEAR_COUNT:
+                        last_gesture = {"gesture": "—", "gesture_conf": 0.0}
+                        gesture_hist.clear()
                 else:
+                    # saw a hand again
+                    hand_miss_count = 0
                     last_hand_seen = time.time()
                     gesture_hist.append(raw_g["gesture"])
 
-                # vote smoothing
-                if len(gesture_hist) == 0:
-                    last_gesture = {"gesture": "—", "gesture_conf": 0.0}
-                else:
+                    # vote smoothing
                     counts = Counter(gesture_hist)
                     best_gesture, best_votes = counts.most_common(1)[0]
 
-                    if best_gesture == "—" or best_votes < GESTURE_MIN_VOTES:
-                        last_gesture = {"gesture": "—", "gesture_conf": 0.0}
-                    else:
+                    if best_gesture != "—" and best_votes >= GESTURE_MIN_VOTES:
                         last_gesture = {
                             "gesture": best_gesture,
                             "gesture_conf": round(best_votes / len(gesture_hist), 3),
                         }
+                    # else: keep last_gesture (don’t instantly blank)
 
             # Extra safety: if we haven't seen a hand recently, force clear
             if last_gesture["gesture"] != "—":
                 if last_hand_seen == 0.0 or (time.time() - last_hand_seen) * 1000.0 > HAND_LOST_MS:
                     last_gesture = {"gesture": "—", "gesture_conf": 0.0}
                     gesture_hist.clear()
+                    hand_miss_count = 0
 
             latency_ms = (time.perf_counter() - t0) * 1000.0
 
