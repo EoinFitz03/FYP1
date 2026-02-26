@@ -1,17 +1,22 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { createWS } from "../services/wsClient";
+import { useEffect, useRef, useState } from "react";
+import { useWebcam } from "../hooks/useWebcam";
+import { useWS } from "../hooks/useWS";
+import { useFrameLoop } from "../hooks/useFrameLoop";
+import { buildEnrolStart, buildEnrolCancel, buildFrameMessage } from "../services/protocol";
 
 import "../styles/live.css";
 
 export default function Enroll() {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
-  const wsRef = useRef(null);
-  const timerRef = useRef(null);
 
-  const [connected, setConnected] = useState(false);
-  const [running, setRunning] = useState(false);
+  const wsUrl = "ws://localhost:8000/ws";
+
+  const { ready: webcamReady, error: camError } = useWebcam(videoRef);
+  const { connected, error: wsError, lastMessage, sendJson } = useWS(wsUrl);
+
   const [err, setErr] = useState("");
+  const [running, setRunning] = useState(false);
 
   const [name, setName] = useState("");
   const [target, setTarget] = useState(10);
@@ -24,124 +29,71 @@ export default function Enroll() {
     error: null,
   });
 
-  const wsUrl = useMemo(() => "ws://localhost:8000/ws", []);
+  // Send frames ONLY while enrol is running (same behaviour as old code)
+  useFrameLoop({
+    enabled: running && connected && webcamReady,
+    videoRef,
+    canvasRef,
+    sendJson,
+    intervalMs: 350,
+    frameOptions: { width: 640, height: 360, quality: 0.6 },
+    messageBuilder: (b64) => buildFrameMessage(b64), // { type:"frame", data:b64 }
+  });
+
+  // Handle backend enrol status messages (THIS is the key!)
+  useEffect(() => {
+    if (!lastMessage) return;
+
+    try {
+      // lastMessage is already parsed JSON in useWS
+      const msg = lastMessage;
+
+      if (msg.type === "enrol_status") {
+        const p = msg.payload || {};
+
+        setEnrol({
+          active: !!p.active,
+          captured: p.captured ?? 0,
+          target: p.target ?? 0,
+          done: !!p.done,
+          error: p.error ?? null,
+        });
+
+        // Auto-stop sending frames once finished (same as old)
+        if (p.done) setRunning(false);
+      }
+    } catch {
+      // ignore
+    }
+  }, [lastMessage]);
 
   useEffect(() => {
-    (async () => {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: true,
-          audio: false,
-        });
-        if (videoRef.current) videoRef.current.srcObject = stream;
-      } catch {
-        setErr("Could not access webcam. Check permissions.");
-      }
-    })();
+    if (wsError) setErr("WebSocket error (is backend running on :8000?)");
+  }, [wsError]);
 
-    return () => {
-      const v = videoRef.current;
-      const s = v?.srcObject;
-      if (s && typeof s.getTracks === "function") s.getTracks().forEach((t) => t.stop());
-    };
-  }, []);
-
-  const connectWS = () => {
-    if (wsRef.current) return;
-
-    wsRef.current = createWS(wsUrl, {
-      onOpen: () => setConnected(true),
-      onClose: () => setConnected(false),
-      onError: () => setErr("WebSocket error (is backend running on :8000?)"),
-      onMessage: (data) => {
-        try {
-          const msg = JSON.parse(data);
-          if (msg.type === "enrol_status") {
-            setEnrol({
-              active: !!msg.payload?.active,
-              captured: msg.payload?.captured ?? 0,
-              target: msg.payload?.target ?? 0,
-              done: !!msg.payload?.done,
-              error: msg.payload?.error ?? null,
-            });
-
-            // Auto stop sending frames once finished
-            if (msg.payload?.done) stopSendingFramesOnly();
-          }
-        } catch {
-          // ignore
-        }
-      },
-    });
-  };
-
-  const disconnectWS = () => {
-    if (wsRef.current) wsRef.current.close();
-    wsRef.current = null;
-    setConnected(false);
-  };
-
-  const sendFrame = () => {
-    const ws = wsRef.current;
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-
-    if (!ws || ws.readyState !== 1 || !video || !canvas) return;
-    if (video.readyState < 2) return;
-
-    const w = 640;
-    const h = 360;
-
-    canvas.width = w;
-    canvas.height = h;
-
-    const ctx = canvas.getContext("2d");
-    ctx.drawImage(video, 0, 0, w, h);
-
-    const dataUrl = canvas.toDataURL("image/jpeg", 0.6);
-    const base64 = dataUrl.split(",")[1];
-
-    ws.send(JSON.stringify({ type: "frame", data: base64 }));
-  };
-
-  const startSendingFrames = () => {
-    if (timerRef.current) return;
-
-    setRunning(true);
-    timerRef.current = setInterval(() => {
-      const ws = wsRef.current;
-      if (!ws || ws.readyState !== 1) return;
-      sendFrame();
-    }, 350);
-  };
-
-  const stopSendingFramesOnly = () => {
-    setRunning(false);
-    if (timerRef.current) clearInterval(timerRef.current);
-    timerRef.current = null;
-  };
+  useEffect(() => {
+    if (camError) setErr(camError);
+  }, [camError]);
 
   const startEnroll = () => {
     setErr("");
-    setEnrol({ active: false, captured: 0, target: 0, done: false, error: null });
-
-    connectWS();
-
-    const ws = wsRef.current;
-    if (!ws) return;
 
     const cleanName = name.trim();
     const n = Math.max(3, Math.min(30, Number(target) || 10));
 
-    ws.send(JSON.stringify({ type: "enrol_start", name: cleanName, num_samples: n }));
-    startSendingFrames();
+    setEnrol({ active: false, captured: 0, target: 0, done: false, error: null });
+
+    // Send enrol_start EXACTLY like old backend expects
+    sendJson(buildEnrolStart(cleanName, n));
+
+    // Start streaming frames
+    setRunning(true);
   };
 
   const cancelEnroll = () => {
-    const ws = wsRef.current;
-    if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "enrol_cancel" }));
-    stopSendingFramesOnly();
-    disconnectWS();
+    // Tell backend to cancel, stop frames
+    sendJson(buildEnrolCancel());
+    setRunning(false);
   };
 
   const statusClass = connected ? "statusPill statusConnected" : "statusPill statusDisconnected";
@@ -172,7 +124,13 @@ export default function Enroll() {
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="e.g. Eoin"
-              style={{ width: "100%", marginTop: 6, padding: 10, borderRadius: 10, border: "1px solid #222" }}
+              style={{
+                width: "100%",
+                marginTop: 6,
+                padding: 10,
+                borderRadius: 10,
+                border: "1px solid #222",
+              }}
               disabled={running}
             />
           </label>
@@ -185,16 +143,30 @@ export default function Enroll() {
               onChange={(e) => setTarget(e.target.value)}
               min={3}
               max={30}
-              style={{ width: "100%", marginTop: 6, padding: 10, borderRadius: 10, border: "1px solid #222" }}
+              style={{
+                width: "100%",
+                marginTop: 6,
+                padding: 10,
+                borderRadius: 10,
+                border: "1px solid #222",
+              }}
               disabled={running}
             />
           </label>
 
-          <button onClick={startEnroll} className="primaryBtn" disabled={running || !name.trim()}>
+          <button
+            onClick={startEnroll}
+            className="primaryBtn"
+            disabled={running || !name.trim() || !connected || !webcamReady}
+          >
             Start Enroll
           </button>
 
-          <button onClick={cancelEnroll} className="primaryBtn" disabled={!running && !connected}>
+          <button
+            onClick={cancelEnroll}
+            className="primaryBtn"
+            disabled={!running && !connected}
+          >
             Cancel / Stop
           </button>
         </div>
