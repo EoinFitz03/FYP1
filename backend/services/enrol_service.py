@@ -1,24 +1,15 @@
 from __future__ import annotations
 
+import time
 from typing import Any, Callable, Dict, List, Optional
 
-import time
-import numpy as np
 import cv2
+import numpy as np
 import face_recognition
 
-from db import Database  # Demo1/db.py 
-
+from db import Database  # Demo1/db.py
 
 class EnrolService:
-    """
-    Same enrol behaviour you already implemented:
-    - enrol_start / enrol_cancel
-    - collect N encodings from incoming frames
-    - average encodings
-    - save into Demo1 system.db
-    - reload known faces (callback) so Live updates immediately
-    """
 
     def __init__(
         self,
@@ -40,9 +31,7 @@ class EnrolService:
 
     def start(self, name: str, num_samples: int) -> Dict[str, Any]:
         self.name = str(name).strip()
-        n = int(num_samples)
-        self.target = max(3, min(30, n))
-
+        self.target = max(3, min(30, int(num_samples)))
         self.collected = []
         self.last_capture = 0.0
         self.active = bool(self.name)
@@ -73,73 +62,45 @@ class EnrolService:
             "ts": time.time(),
         }
 
-    def extract_single_face_encoding(self, bgr: np.ndarray) -> Optional[np.ndarray]:
-        small = cv2.resize(bgr, (0, 0), fx=0.25, fy=0.25)
-        rgb_small = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
-
-        locs = face_recognition.face_locations(rgb_small, model=self.model)
-        if not locs:
-            return None
-
-        encs = face_recognition.face_encodings(rgb_small, locs)
-        if not encs:
-            return None
-
-        if len(encs) != 1:
-            return None
-
-        return encs[0]
-
     def try_capture(self, bgr: np.ndarray) -> Optional[Dict[str, Any]]:
         """
-        Called on each incoming frame.
-        Returns an enrol_status payload dict when:
-        - we capture a new encoding, OR
-        - we finish and save.
-        Otherwise returns None.
+        Called on each incoming frame while enrolment is active.
+        Returns a status payload when something meaningful happens, else None.
         """
         if not self.active:
             return None
 
-        now = time.time()
-        if (now - self.last_capture) * 1000.0 < self.min_ms_between_captures:
+        if (time.time() - self.last_capture) * 1000.0 < self.min_ms_between_captures:
             return None
 
-        enc = self.extract_single_face_encoding(bgr)
+        enc = self._extract_single_face_encoding(bgr)
         if enc is None:
             return None
 
         self.collected.append(enc)
-        self.last_capture = now
-
-        # progress update
-        progress = {
-            "active": True,
-            "name": self.name,
-            "captured": len(self.collected),
-            "target": self.target,
-            "done": False,
-            "error": None,
-            "ts": time.time(),
-        }
+        self.last_capture = time.time()
 
         if len(self.collected) < self.target:
-            return progress
+            return {
+                "active": True,
+                "name": self.name,
+                "captured": len(self.collected),
+                "target": self.target,
+                "done": False,
+                "error": None,
+                "ts": time.time(),
+            }
 
-        # finish: average + save
+        # All samples collected — save and reset
         mean_encoding = np.mean(self.collected, axis=0)
-
         db = Database(self.db_path)
-        user_id = db.get_user_id(self.name)
-        if user_id is None:
-            user_id = db.add_user(self.name)
+        user_id = db.get_user_id(self.name) or db.add_user(self.name)
         db.add_face_encoding(user_id, mean_encoding)
         db.close()
 
-        # reload face encodings (same behaviour as before)
         self.on_saved()
+        saved_target = self.target
 
-        # reset enrol state
         self.active = False
         self.name = ""
         self.collected = []
@@ -148,9 +109,23 @@ class EnrolService:
         return {
             "active": False,
             "name": "",
-            "captured": self.target,
-            "target": self.target,
+            "captured": saved_target,
+            "target": saved_target,
             "done": True,
             "error": None,
             "ts": time.time(),
         }
+
+    def _extract_single_face_encoding(self, bgr: np.ndarray) -> Optional[np.ndarray]:
+        small = cv2.resize(bgr, (0, 0), fx=0.25, fy=0.25)
+        rgb_small = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
+
+        locs = face_recognition.face_locations(rgb_small, model=self.model)
+        if not locs:
+            return None
+
+        encs = face_recognition.face_encodings(rgb_small, locs)
+        if not encs or len(encs) != 1:
+            return None
+
+        return encs[0]
