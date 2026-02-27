@@ -1,19 +1,13 @@
 from __future__ import annotations
-
 from typing import Any, Dict, List, Tuple
 
 import numpy as np
 import cv2
 import face_recognition
 
-from db import Database  # Demo1/db.py 
-
+from db import Database  # Demo1/db.py
 
 class FaceService:
-    """
-    Same logic as your original recognize_person + DB loading.
-    Just wrapped in a class so app.py stays small.
-    """
 
     def __init__(self, db_path: str, tolerance: float, downscale: float, model: str) -> None:
         self.db_path = db_path
@@ -24,31 +18,28 @@ class FaceService:
         self.known_encodings: List[np.ndarray] = []
         self.known_names: List[str] = []
 
-    def load_known_faces_from_db(self) -> Tuple[List[np.ndarray], List[str]]:
-        db = Database(self.db_path)
-        encs, names = db.load_all_encodings()
-        encs = [np.asarray(e) for e in encs]
-        names = [str(n) for n in names]
-        return encs, names
-
     def load_known_faces(self) -> None:
         try:
-            self.known_encodings, self.known_names = self.load_known_faces_from_db()
-            print(f"[backend] Loaded {len(self.known_encodings)} encodings from {self.db_path}")
+            db = Database(self.db_path)
+            encs, names = db.load_all_encodings()
+            db.close()
+            self.known_encodings = [np.asarray(e) for e in encs]
+            self.known_names = [str(n) for n in names]
+            print(f"[FaceService] Loaded {len(self.known_encodings)} encodings from {self.db_path}")
         except Exception as e:
-            print(f"[backend] Failed loading encodings: {e}")
+            print(f"[FaceService] Failed loading encodings: {e}")
             self.known_encodings, self.known_names = [], []
 
     def recognize_person(self, bgr: np.ndarray) -> Dict[str, Any]:
-        if len(self.known_encodings) == 0:
+        if not self.known_encodings:
             return {"person": "Unknown", "face_conf": 0.0, "distance": None}
 
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-
-        if self.downscale != 1.0:
-            rgb_small = cv2.resize(rgb, (0, 0), fx=self.downscale, fy=self.downscale)
-        else:
-            rgb_small = rgb
+        rgb_small = (
+            cv2.resize(rgb, (0, 0), fx=self.downscale, fy=self.downscale)
+            if self.downscale != 1.0
+            else rgb
+        )
 
         locations = face_recognition.face_locations(rgb_small, model=self.model)
         if not locations:
@@ -63,7 +54,7 @@ class FaceService:
 
         for enc in encs:
             distances = face_recognition.face_distance(self.known_encodings, enc)
-            if len(distances) == 0:
+            if not len(distances):
                 continue
             i = int(np.argmin(distances))
             d = float(distances[i])

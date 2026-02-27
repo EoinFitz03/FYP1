@@ -3,7 +3,7 @@ import collections
 from enum import Enum
 
 import cv2
-import mediapipe as mp 
+import mediapipe as mp
 
 # Config
 CAM_INDEX = 0                 # Your webcam index
@@ -31,10 +31,10 @@ mp_styles = mp.solutions.drawing_styles
 # Landmarks index map for readability
 WRIST = 0
 THUMB_TIP, THUMB_IP, THUMB_MCP = 4, 3, 2
-INDEX_TIP, INDEX_PIP = 8, 6
-MIDDLE_TIP, MIDDLE_PIP = 12, 10
-RING_TIP, RING_PIP = 16, 14
-PINKY_TIP, PINKY_PIP = 20, 18
+INDEX_TIP, INDEX_PIP, INDEX_MCP = 8, 6, 5
+MIDDLE_TIP, MIDDLE_PIP, MIDDLE_MCP = 12, 10, 9
+RING_TIP, RING_PIP, RING_MCP = 16, 14, 13
+PINKY_TIP, PINKY_PIP, PINKY_MCP = 20, 18, 17
 
 FINGER_TIP_PIP = [
     (INDEX_TIP, INDEX_PIP),
@@ -43,29 +43,62 @@ FINGER_TIP_PIP = [
     (PINKY_TIP, PINKY_PIP),
 ]
 
+FINGER_TIP_MCP = [
+    (INDEX_TIP, INDEX_MCP),
+    (MIDDLE_TIP, MIDDLE_MCP),
+    (RING_TIP, RING_MCP),
+    (PINKY_TIP, PINKY_MCP),
+]
+
+def _dist(a, b):
+    dx = a.x - b.x
+    dy = a.y - b.y
+    return (dx * dx + dy * dy) ** 0.5
+
 def _is_extended_y(landmarks, tip_idx, pip_idx):
-    """Return True if finger is likely extended."""
+    """Return True if finger is likely extended (tip above pip in image coords)."""
     lm = landmarks
     return lm[tip_idx].y < lm[pip_idx].y
 
 def _thumb_up_basic(landmarks):
-    """A very basic thumbs up heuristic: thumb tip above wrist and other fingers folded.
-    Works when hand is upright and camera-facing
+    """
+    Easier thumbs-up:
+    - thumb must be clearly extended (distance-based, scale-invariant)
+    - thumb tip should be above its own joints (IP + MCP), not the wrist
+    - other fingers should be mostly folded (2/4 is enough)
     """
     lm = landmarks
-    up = lm[THUMB_TIP].y < lm[WRIST].y
-    # Consider other fingers mostly folded
-    folded_others = True
-    for tip, pip in FINGER_TIP_PIP:
-        if lm[tip].y < lm[pip].y:
-            folded_others = False
-            break
-    return up and folded_others
+
+    # A simple "hand size" reference so thresholds scale with distance to camera
+    hand_size = _dist(lm[WRIST], lm[MIDDLE_MCP])
+    if hand_size < 1e-6:
+        return False
+
+    # Thumb is extended enough
+    thumb_len = _dist(lm[THUMB_TIP], lm[THUMB_MCP])
+    thumb_extended = thumb_len > 0.45 * hand_size
+
+    # Thumb points upward (compare to its own joints instead of wrist)
+    thumb_up = (lm[THUMB_TIP].y < lm[THUMB_IP].y) and (lm[THUMB_TIP].y < lm[THUMB_MCP].y)
+
+    # Other fingers: count folded
+    # Folded if tip is below pip OR if tip is close to its MCP (distance-based)
+    folded = 0
+    for (tip, pip), (_, mcp) in zip(FINGER_TIP_PIP, FINGER_TIP_MCP):
+        folded_by_y = lm[tip].y > lm[pip].y
+        folded_by_dist = _dist(lm[tip], lm[mcp]) < 0.42 * hand_size
+        if folded_by_y or folded_by_dist:
+            folded += 1
+
+    # Allow some messiness: 2+ folded fingers is enough
+    folded_others = folded >= 2
+
+    return thumb_extended and thumb_up and folded_others
 
 def classify_gesture(hand_landmarks) -> Gesture:
     lm = hand_landmarks.landmark
 
-    # Non-thumb fingers: count how many are extended 
+    # Non-thumb fingers: count how many are extended
     extended = 0
     for tip, pip in FINGER_TIP_PIP:
         if _is_extended_y(lm, tip, pip):
@@ -74,11 +107,14 @@ def classify_gesture(hand_landmarks) -> Gesture:
     # Strong, simple classes first
     if extended >= 4:
         return Gesture.OPEN_PALM
-    if extended == 0:
-        # maybe thumbs up? If not, it's a fist.
-        return Gesture.THUMBS_UP if _thumb_up_basic(lm) else Gesture.FIST
 
-    # Otherwise unknown for now 
+    # Check thumbs up BEFORE fist (because thumbs up often has 0 extended fingers)
+    if _thumb_up_basic(lm):
+        return Gesture.THUMBS_UP
+
+    if extended == 0:
+        return Gesture.FIST
+
     return Gesture.UNKNOWN
 
 class DebounceState:
@@ -107,10 +143,8 @@ class DebounceState:
     def mark_fired(self):
         self.last_fire_time = time.time()
 
-# Main loop
 def main():
     cap = cv2.VideoCapture(CAM_INDEX)
-
     state = DebounceState(WINDOW_SIZE, COOLDOWN_SECONDS)
 
     fps_t0, fps_counter = time.time(), 0
@@ -127,19 +161,15 @@ def main():
             if not ok:
                 break
 
-            # Mirror for a selfie view 
             frame = cv2.flip(frame, 1)
-
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             result = hands.process(rgb)
 
             current = Gesture.UNKNOWN
             if result.multi_hand_landmarks:
-                # Only use the first detected hand for now
                 hand_lms = result.multi_hand_landmarks[0]
                 current = classify_gesture(hand_lms)
 
-                # Draw landmarks for feedback
                 mp_draw.draw_landmarks(
                     frame,
                     hand_lms,
@@ -148,21 +178,17 @@ def main():
                     mp_styles.get_default_hand_connections_style(),
                 )
 
-            # Debounce / confirmation
             state.update(current)
             confirmed = state.stable_gesture()
             if confirmed != Gesture.UNKNOWN and state.can_fire():
-                # === This is where you trigger an action ===
-                # For now we just print once per confirmed gesture
                 print({"event": str(confirmed), "ts": round(time.time(), 3)})
                 state.mark_fired()
 
-            # HUD
-            fps_counter += 1    # Every frame we add +1 to our frame count
-            now = time.time()   # Check the current time (in seconds)
-            if now - fps_t0 >= 1.0:      # Has one second passed
-                fps_display = fps_counter / (now - fps_t0)   # Calculate frames per second
-                fps_counter, fps_t0 = 0, now  # reset the counter 
+            fps_counter += 1
+            now = time.time()
+            if now - fps_t0 >= 1.0:
+                fps_display = fps_counter / (now - fps_t0)
+                fps_counter, fps_t0 = 0, now
 
             cv2.putText(frame, f"Gesture: {current}", (12, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
             cv2.putText(frame, f"FPS: {fps_display:.1f}", (12, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
@@ -173,7 +199,6 @@ def main():
 
     cap.release()
     cv2.destroyAllWindows()
-
 
 if __name__ == "__main__":
     main()
