@@ -38,6 +38,19 @@ export default function StreamPanel({
   const [result, setResult] = useState(null);
   const [err, setErr] = useState("");
 
+  // --- NEW: Training UI state ---
+  const [trainLabel, setTrainLabel] = useState("open_palm");
+  const [trainSamples, setTrainSamples] = useState(200);
+  const [trainStatus, setTrainStatus] = useState({
+    active: false,
+    label: null,
+    count: 0,
+    target: 0,
+    saved: false,
+    finished: false,
+    error: null,
+  });
+
   // Door state for simulation text
   const [doorState, setDoorState] = useState("CLOSED"); // CLOSED | OPENING | OPEN | CLOSING
   const doorTimeoutRef = useRef(null);
@@ -57,8 +70,20 @@ export default function StreamPanel({
   // Parse results from backend
   useEffect(() => {
     if (!lastMessage) return;
+
     if (lastMessage.type === "result") {
       setResult(lastMessage.payload ?? lastMessage);
+      return;
+    }
+
+    // --- NEW: Training status messages from backend ---
+    if (lastMessage.type === "train_status") {
+      const p = lastMessage.payload ?? {};
+      setTrainStatus((prev) => ({
+        ...prev,
+        ...p,
+      }));
+      return;
     }
   }, [lastMessage]);
 
@@ -146,6 +171,31 @@ export default function StreamPanel({
 
   const stop = () => setRunning(false);
 
+  // --- NEW: Training button actions ---
+  const startTraining = () => {
+    setErr("");
+    const label = String(trainLabel || "").trim();
+    const num = Number(trainSamples) || 200;
+
+    if (!label) {
+      setErr("Training label is empty (e.g. open_palm)");
+      return;
+    }
+
+    const ok = sendJson({
+      type: "train_start",
+      label,
+      num_samples: num,
+    });
+
+    if (!ok) setErr("Could not send train_start (is WS connected?)");
+  };
+
+  const stopTraining = () => {
+    const ok = sendJson({ type: "train_stop" });
+    if (!ok) setErr("Could not send train_stop (is WS connected?)");
+  };
+
   const statusClass = connected
     ? "statusPill statusConnected"
     : "statusPill statusDisconnected";
@@ -158,6 +208,12 @@ export default function StreamPanel({
       : doorState === "CLOSING"
       ? "DOOR CLOSING..."
       : "DOOR CLOSED 🔒";
+
+  const trainText = trainStatus.active
+    ? `RECORDING: ${trainStatus.label} (${trainStatus.count}/${trainStatus.target})`
+    : trainStatus.finished
+    ? `FINISHED: ${trainStatus.count}/${trainStatus.target}`
+    : "NOT RECORDING";
 
   return (
     <div className="gridTwoCol">
@@ -197,6 +253,73 @@ export default function StreamPanel({
             </div>
           </div>
         ) : null}
+
+        {/* =======================
+            NEW: Training Controls
+           ======================= */}
+        <div style={{ marginTop: 18 }}>
+          <h4 className="sectionTitle">Training (Dataset Capture)</h4>
+
+          <div className="smallText" style={{ marginBottom: 10, opacity: 0.9 }}>
+            <div>
+              <b>Status:</b> {trainText}
+            </div>
+            <div style={{ opacity: 0.85 }}>
+              Records MediaPipe hand points into <b>backend/dataset/gestures.csv</b>
+            </div>
+          </div>
+
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <label className="smallText" style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              <b>Label</b>
+              <input
+                value={trainLabel}
+                onChange={(e) => setTrainLabel(e.target.value)}
+                placeholder="open_palm"
+                style={{ padding: "6px 8px", minWidth: 140 }}
+                disabled={!connected}
+              />
+            </label>
+
+            <label className="smallText" style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              <b>Samples</b>
+              <input
+                type="number"
+                value={trainSamples}
+                onChange={(e) => setTrainSamples(e.target.value)}
+                min={10}
+                max={5000}
+                style={{ padding: "6px 8px", width: 90 }}
+                disabled={!connected}
+              />
+            </label>
+          </div>
+
+          <div style={{ display: "flex", gap: 10, marginTop: 10, flexWrap: "wrap" }}>
+            <button
+              onClick={startTraining}
+              className="primaryBtn"
+              disabled={!connected || !running || !webcamReady}
+              title={!running ? "Start the session first so frames are sending" : ""}
+            >
+              Start Training
+            </button>
+
+            <button
+              onClick={stopTraining}
+              className="secondaryBtn"
+              disabled={!connected}
+            >
+              Stop Training
+            </button>
+          </div>
+
+          {!running ? (
+            <div className="smallText" style={{ marginTop: 8, opacity: 0.8 }}>
+              Tip: click <b>Start</b> first (so frames are streaming), then click <b>Start Training</b>.
+            </div>
+          ) : null}
+        </div>
 
         {doorSim ? (
           <div style={{ marginTop: 16 }}>
