@@ -30,6 +30,9 @@ from services.face_service import FaceService
 from services.gesture_service import GestureService
 from services.enrol_service import EnrolService
 
+# NEW (Step 1 training capture)
+from training.capture import TrainingState, try_capture_landmarks
+
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
@@ -42,6 +45,9 @@ app.add_middleware(
 face_svc: FaceService | None = None
 gesture_svc: GestureService | None = None
 enrol_svc: EnrolService | None = None
+
+# NEW (Step 1 training capture)
+train_state = TrainingState()
 
 
 @app.on_event("startup")
@@ -106,6 +112,49 @@ async def ws_endpoint(ws: WebSocket):
                 await ws.send_text(json.dumps({"type": "enrol_status", "payload": status}))
                 continue
 
+            # --- Training controls (Step 1 dataset capture) ---
+            if mtype == "train_start":
+                label = str(msg.get("label", "")).strip()
+                target = int(msg.get("num_samples", 200))
+
+                if not label:
+                    await ws.send_text(json.dumps({
+                        "type": "train_status",
+                        "payload": {"active": False, "error": "missing_label"},
+                    }))
+                    continue
+
+                train_state.active = True
+                train_state.label = label
+                train_state.target = target
+                train_state.count = 0
+
+                await ws.send_text(json.dumps({
+                    "type": "train_status",
+                    "payload": {
+                        "active": True,
+                        "label": train_state.label,
+                        "count": train_state.count,
+                        "target": train_state.target,
+                    },
+                }))
+                continue
+
+            if mtype == "train_stop":
+                train_state.active = False
+                train_state.label = None
+
+                await ws.send_text(json.dumps({
+                    "type": "train_status",
+                    "payload": {
+                        "active": False,
+                        "label": None,
+                        "count": train_state.count,
+                        "target": train_state.target,
+                    },
+                }))
+                continue
+
             # --- Non-frame messages: return current snapshot ---
             if mtype != "frame":
                 payload = session.build_snapshot()
@@ -126,6 +175,26 @@ async def ws_endpoint(ws: WebSocket):
                 enrol_update = enrol_svc.try_capture(bgr)
                 if enrol_update is not None:
                     await ws.send_text(json.dumps({"type": "enrol_status", "payload": enrol_update}))
+
+            # --- Training capture (Step 1): save landmarks to CSV ---
+            did_save, should_send, finished = try_capture_landmarks(
+                bgr=bgr,
+                cfg=cfg,
+                gesture_svc=gesture_svc,
+                state=train_state,
+            )
+            if should_send:
+                await ws.send_text(json.dumps({
+                    "type": "train_status",
+                    "payload": {
+                        "active": train_state.active,
+                        "label": train_state.label,
+                        "count": train_state.count,
+                        "target": train_state.target,
+                        "saved": did_save,
+                        "finished": finished,
+                    },
+                }))
 
             # --- Process frame (face + gesture) ---
             payload = session.process_frame(bgr, face_svc, gesture_svc)
