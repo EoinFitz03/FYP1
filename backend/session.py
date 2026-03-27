@@ -89,7 +89,10 @@ class SessionState:
                 self.last_face = new_face
 
     def _update_gesture(self, bgr: np.ndarray, gesture_svc: GestureService) -> None:
-        raw = gesture_svc.detect_gesture_fast(bgr)
+        # Step 3: try trained gesture model first, then fall back to rule-based classifier
+        raw = gesture_svc.predict_trained_gesture(bgr)
+        if raw.get("gesture") == "—":
+            raw = gesture_svc.detect_gesture_fast(bgr)
 
         if raw["gesture"] == "—":
             self.hand_miss_count += 1
