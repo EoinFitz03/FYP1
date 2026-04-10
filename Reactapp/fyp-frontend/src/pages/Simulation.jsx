@@ -1,5 +1,5 @@
 import StreamPanel from "../components/StreamPanel";
-
+// bad
 export default function Simulation() {
   return (
     <StreamPanel
