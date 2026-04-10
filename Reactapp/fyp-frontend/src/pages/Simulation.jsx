@@ -9,6 +9,7 @@ export default function Simulation() {
       doorSim={true}
       openGesture="thumbs_up"
       closeGesture="open_palm"
+      showTraining={false}
     />
   );
 }

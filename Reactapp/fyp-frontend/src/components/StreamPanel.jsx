@@ -6,6 +6,8 @@ import { useFrameLoop } from "../hooks/useFrameLoop";
 
 import "../styles/live.css";
 
+const STORAGE_KEY = "doorbell_recent_results";
+
 // Normalise gesture text so "ThumbsUp", "thumbs_up", "thumbs up" all match.
 const norm = (s) =>
   String(s || "")
@@ -23,12 +25,17 @@ export default function StreamPanel({
   // Door simulation props (used by Simulation)
   doorSim = false,
 
+  // Show training controls only where needed
+  showTraining = false,
+
   // Defaults match your backend values
   openGesture = "thumbs_up",
   closeGesture = "open_palm",
 }) {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
+  const doorTimeoutRef = useRef(null);
+  const lastLoggedRef = useRef({ person: null, timeMs: 0 });
 
   const { ready: webcamReady, error: camError } = useWebcam(videoRef);
   const { connected, error: wsError, lastMessage, sendJson } = useWS(wsUrl);
@@ -38,7 +45,7 @@ export default function StreamPanel({
   const [result, setResult] = useState(null);
   const [err, setErr] = useState("");
 
-  // --- NEW: Training UI state ---
+  // Training UI state
   const [trainLabel, setTrainLabel] = useState("open_palm");
   const [trainSamples, setTrainSamples] = useState(200);
   const [trainStatus, setTrainStatus] = useState({
@@ -53,9 +60,7 @@ export default function StreamPanel({
 
   // Door state for simulation text
   const [doorState, setDoorState] = useState("CLOSED"); // CLOSED | OPENING | OPEN | CLOSING
-  const doorTimeoutRef = useRef(null);
 
-  // Send frames when running
   useFrameLoop({
     enabled: running && connected && webcamReady,
     videoRef,
@@ -63,7 +68,6 @@ export default function StreamPanel({
     sendJson,
     intervalMs: 350,
     frameOptions: { width: 640, height: 360, quality: 0.6 },
-    // EXACT backend format
     messageBuilder: (b64) => ({ type: "frame", data: b64 }),
   });
 
@@ -76,7 +80,6 @@ export default function StreamPanel({
       return;
     }
 
-    // --- NEW: Training status messages from backend ---
     if (lastMessage.type === "train_status") {
       const p = lastMessage.payload ?? {};
       setTrainStatus((prev) => ({
@@ -87,6 +90,39 @@ export default function StreamPanel({
     }
   }, [lastMessage]);
 
+  // Save recent results for Results page
+  useEffect(() => {
+    if (!result?.person) return;
+
+    const person = String(result.person).trim();
+    if (!person) return;
+
+    const now = Date.now();
+    const last = lastLoggedRef.current;
+
+    // Avoid spamming localStorage every frame
+    // Log only if person changed OR 8 seconds passed
+    if (last.person === person && now - last.timeMs < 8000) return;
+
+    lastLoggedRef.current = { person, timeMs: now };
+
+    const entry = {
+      id: `${now}-${person}`,
+      person,
+      face_conf: typeof result.face_conf === "number" ? result.face_conf : null,
+      time: new Date(now).toLocaleString(),
+    };
+
+    try {
+      const existing = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
+      const arr = Array.isArray(existing) ? existing : [];
+      const updated = [entry, ...arr].slice(0, 20);
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+    } catch {
+      // fail silently
+    }
+  }, [result]);
+
   // Errors
   useEffect(() => {
     if (wsError) setErr("WebSocket error (is backend running on :8000?)");
@@ -96,7 +132,7 @@ export default function StreamPanel({
     if (camError) setErr(camError);
   }, [camError]);
 
-  // Timed session countdown (simulation mode)
+  // Timed session countdown
   useEffect(() => {
     if (!timed || !running) return;
 
@@ -109,18 +145,16 @@ export default function StreamPanel({
     return () => clearTimeout(t);
   }, [timed, running, secondsLeft]);
 
-  // Door logic driven by gestures (only when enabled)
+  // Door logic driven by gestures
   useEffect(() => {
     if (!doorSim) return;
     if (!running) return;
     if (!result) return;
 
-    // Support both possible keys
     const rawGesture = result.gesture ?? result.hand_gesture ?? "";
     const g = norm(rawGesture);
     if (!g) return;
 
-    // Clear any previous transition timer
     if (doorTimeoutRef.current) {
       clearTimeout(doorTimeoutRef.current);
       doorTimeoutRef.current = null;
@@ -129,7 +163,6 @@ export default function StreamPanel({
     const openKey = norm(openGesture);
     const closeKey = norm(closeGesture);
 
-    // Thumbs up => OPEN
     if (g === openKey) {
       setDoorState("OPENING");
       doorTimeoutRef.current = setTimeout(() => {
@@ -139,7 +172,6 @@ export default function StreamPanel({
       return;
     }
 
-    // Open palm => CLOSE
     if (g === closeKey) {
       setDoorState("CLOSING");
       doorTimeoutRef.current = setTimeout(() => {
@@ -150,7 +182,7 @@ export default function StreamPanel({
     }
   }, [doorSim, running, result, openGesture, closeGesture]);
 
-  // Reset door when session stops
+  // Reset door when stopped
   useEffect(() => {
     if (!doorSim) return;
 
@@ -171,7 +203,6 @@ export default function StreamPanel({
 
   const stop = () => setRunning(false);
 
-  // --- NEW: Training button actions ---
   const startTraining = () => {
     setErr("");
     const label = String(trainLabel || "").trim();
@@ -254,72 +285,77 @@ export default function StreamPanel({
           </div>
         ) : null}
 
-        {/* =======================
-            NEW: Training Controls
-           ======================= */}
-        <div style={{ marginTop: 18 }}>
-          <h4 className="sectionTitle">Training (Dataset Capture)</h4>
+        {showTraining ? (
+          <div style={{ marginTop: 18 }}>
+            <h4 className="sectionTitle">Training (Dataset Capture)</h4>
 
-          <div className="smallText" style={{ marginBottom: 10, opacity: 0.9 }}>
-            <div>
-              <b>Status:</b> {trainText}
+            <div className="smallText" style={{ marginBottom: 10, opacity: 0.9 }}>
+              <div>
+                <b>Status:</b> {trainText}
+              </div>
+              <div style={{ opacity: 0.85 }}>
+                Records MediaPipe hand points into <b>backend/dataset/gestures.csv</b>
+              </div>
             </div>
-            <div style={{ opacity: 0.85 }}>
-              Records MediaPipe hand points into <b>backend/dataset/gestures.csv</b>
-            </div>
-          </div>
 
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-            <label className="smallText" style={{ display: "flex", gap: 6, alignItems: "center" }}>
-              <b>Label</b>
-              <input
-                value={trainLabel}
-                onChange={(e) => setTrainLabel(e.target.value)}
-                placeholder="open_palm"
-                style={{ padding: "6px 8px", minWidth: 140 }}
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+              <label
+                className="smallText"
+                style={{ display: "flex", gap: 6, alignItems: "center" }}
+              >
+                <b>Label</b>
+                <input
+                  value={trainLabel}
+                  onChange={(e) => setTrainLabel(e.target.value)}
+                  placeholder="open_palm"
+                  style={{ padding: "6px 8px", minWidth: 140 }}
+                  disabled={!connected}
+                />
+              </label>
+
+              <label
+                className="smallText"
+                style={{ display: "flex", gap: 6, alignItems: "center" }}
+              >
+                <b>Samples</b>
+                <input
+                  type="number"
+                  value={trainSamples}
+                  onChange={(e) => setTrainSamples(e.target.value)}
+                  min={10}
+                  max={5000}
+                  style={{ padding: "6px 8px", width: 90 }}
+                  disabled={!connected}
+                />
+              </label>
+            </div>
+
+            <div style={{ display: "flex", gap: 10, marginTop: 10, flexWrap: "wrap" }}>
+              <button
+                onClick={startTraining}
+                className="primaryBtn"
+                disabled={!connected || !running || !webcamReady}
+                title={!running ? "Start the session first so frames are sending" : ""}
+              >
+                Start Training
+              </button>
+
+              <button
+                onClick={stopTraining}
+                className="secondaryBtn"
                 disabled={!connected}
-              />
-            </label>
-
-            <label className="smallText" style={{ display: "flex", gap: 6, alignItems: "center" }}>
-              <b>Samples</b>
-              <input
-                type="number"
-                value={trainSamples}
-                onChange={(e) => setTrainSamples(e.target.value)}
-                min={10}
-                max={5000}
-                style={{ padding: "6px 8px", width: 90 }}
-                disabled={!connected}
-              />
-            </label>
-          </div>
-
-          <div style={{ display: "flex", gap: 10, marginTop: 10, flexWrap: "wrap" }}>
-            <button
-              onClick={startTraining}
-              className="primaryBtn"
-              disabled={!connected || !running || !webcamReady}
-              title={!running ? "Start the session first so frames are sending" : ""}
-            >
-              Start Training
-            </button>
-
-            <button
-              onClick={stopTraining}
-              className="secondaryBtn"
-              disabled={!connected}
-            >
-              Stop Training
-            </button>
-          </div>
-
-          {!running ? (
-            <div className="smallText" style={{ marginTop: 8, opacity: 0.8 }}>
-              Tip: click <b>Start</b> first (so frames are streaming), then click <b>Start Training</b>.
+              >
+                Stop Training
+              </button>
             </div>
-          ) : null}
-        </div>
+
+            {!running ? (
+              <div className="smallText" style={{ marginTop: 8, opacity: 0.8 }}>
+                Tip: click <b>Start</b> first, then click <b>Start Training</b>.
+              </div>
+            ) : null}
+          </div>
+        ) : null}
 
         {doorSim ? (
           <div style={{ marginTop: 16 }}>
@@ -328,8 +364,7 @@ export default function StreamPanel({
 
             <div className="smallText" style={{ marginTop: 8, opacity: 0.85 }}>
               <div>
-                <b>Detected gesture:</b>{" "}
-                {result?.gesture ?? result?.hand_gesture ?? "—"}
+                <b>Detected gesture:</b> {result?.gesture ?? result?.hand_gesture ?? "—"}
               </div>
               <div>
                 <b>thumbs_up</b> = Open
