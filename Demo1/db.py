@@ -1,8 +1,8 @@
 import sqlite3
-import json
-import numpy as np
+import json # converting encodings to and from JSON
+import numpy as np # used because face encodings are NumPy arrays
 from datetime import datetime
-
+# Import SQLite, JSON, NumPy, and timestamp tools used for database storage
 
 class Database:
     """
@@ -12,23 +12,23 @@ class Database:
     - Event logging
     """
 
-    def __init__(self, path="system.db"):
-        self.path = path
-        # Single connection object used for all queries on this Database instance
+    def __init__(self, path="system.db"): # Open the SQLite database file and ensure the required tables exist
+        self.path = path # Store the path to the SQLite database file
+        # # Create one SQLite connection for this Database instance
         self.conn = sqlite3.connect(self.path)
         # Open (or create) the SQLite database file
         self._create_tables()
         # creates tables 
 
     # CREATE TABLES
-    def _create_tables(self):
-        cur = self.conn.cursor()
+    def _create_tables(self): # Create the users, face_encodings, and events tables if they are missing
+        cur = self.conn.cursor() # Create a cursor to execute SQL statements
 
         # USERS TABLE
-         # Stores one row per person (name/role/timestamp)
+         # Create the users table to store one row per enrolled person
         cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id INTEGER PRIMARY KEY AUTOINCREMENT, 
             name TEXT NOT NULL,
             role TEXT DEFAULT 'user',
             created_at TEXT NOT NULL
@@ -48,7 +48,7 @@ class Database:
         """)
 
         # EVENTS TABLE (optional but great for logs)
-        # Stores logs of "user did gesture at time"
+        # # Create the events table to log recognised users, gestures, and actions over time
         cur.execute("""
         CREATE TABLE IF NOT EXISTS events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -72,7 +72,7 @@ class Database:
             # gets teh UTC for the time and date 
         )
         self.conn.commit()
-        return cur.lastrowid #new user id 
+        return cur.lastrowid # Save any schema changes to the database
 
     def get_user_id(self, name):
         """Return user_id for a given name, or None if not found."""
