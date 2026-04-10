@@ -1,5 +1,5 @@
 import StreamPanel from "../components/StreamPanel";
-
+// bad
 export default function Simulation() {
   return (
     <StreamPanel
@@ -9,6 +9,7 @@ export default function Simulation() {
       doorSim={true}
       openGesture="thumbs_up"
       closeGesture="open_palm"
+      showTraining={false}
     />
   );
 }
