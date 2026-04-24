@@ -11,7 +11,7 @@ from __future__ import annotations
 
 # Import time, history utilities, configuration, and service types used for session processing
 import time
-from collections import Counter, deque #deque stores recent gesture history,Counter helps vote for the most common gesture
+from collections import Counter, deque # deque stores recent gesture history; Counter is used for majority voting
 from typing import Any, Dict
 
 import numpy as np
@@ -20,7 +20,7 @@ from config import cfg
 from services.face_service import FaceService
 from services.gesture_service import GestureService
 
-# Default values used when no face or gesture is currently recognised
+# Default face and gesture values used when nothing valid is currently detected
 _UNKNOWN_FACE: Dict[str, Any] = {"person": "Unknown", "face_conf": 0.0, "distance": None}
 _EMPTY_GESTURE: Dict[str, Any] = {"gesture": "—", "gesture_conf": 0.0}
 
@@ -28,10 +28,11 @@ _EMPTY_GESTURE: Dict[str, Any] = {"gesture": "—", "gesture_conf": 0.0}
 class SessionState: # Stores live recognition state for a single WebSocket client session
     """One instance per WebSocket connection."""
     # Count how many frames have been processed in this session
+    # Initialise all live per-session state used for frame scheduling, face persistence, and gesture smoothing
     def __init__(self) -> None:
         self.frame_i: int = 0
 
-        # Face state,      Store the most recent face result and when a valid face was last seen
+        # Face state, Store the most recent face result and when a valid face was last seen
         self.last_face: Dict[str, Any] = _UNKNOWN_FACE.copy()
         self.last_face_seen: float = 0.0
 
@@ -39,10 +40,9 @@ class SessionState: # Stores live recognition state for a single WebSocket clien
         self.last_gesture: Dict[str, Any] = _EMPTY_GESTURE.copy() # latest gesture result
         self.gesture_hist: deque = deque(maxlen=cfg.gesture_smooth_window) # recent gesture history, maxlen=cfg.gesture_smooth_window means only recent labels are kept
         self.last_hand_seen: float = 0.0
-        self.hand_miss_count: int = 0 # helps avoid clearing gestures too aggressively
+        self.hand_miss_count: int = 0 # Counts repeated missed hand detections before clearing the gesture
 
-#(7)
-# Process one frame, update face and gesture state, and return a payload for the frontend
+# Process one decoded frame: update scheduled face/gesture results, apply expiry logic, and build the latest payload
     def process_frame(  
         self,
         bgr: np.ndarray,
@@ -65,14 +65,14 @@ class SessionState: # Stores live recognition state for a single WebSocket clien
 
         return self._build_payload()     # Return the latest combined face and gesture state as a frontend payload
 
-    def build_snapshot(self) -> Dict[str, Any]: # Return the current session result without processing a new frame (8)
+    def build_snapshot(self) -> Dict[str, Any]: 
         """Return current state without running any detection (for non-frame messages)."""
         return self._build_payload(latency_ms=0)
 
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
-
+# Update face state and keep the previous recognised face briefly if detection is temporarily lost
     def _update_face(self, bgr: np.ndarray, face_svc: FaceService) -> None:# Update the stored face result using the current frame
         new_face = face_svc.recognize_person(bgr)     # Ask the face service to recognise the person in this frame
 
@@ -88,7 +88,7 @@ class SessionState: # Stores live recognition state for a single WebSocket clien
                 self.last_face = new_face
 # Update the stored gesture result using trained prediction first, then fallback detection
     def _update_gesture(self, bgr: np.ndarray, gesture_svc: GestureService) -> None:
-        # Step 3: try trained gesture model first, then fall back to rule-based classifier
+        #try trained gesture model first, then fall back to rule-based classifier
         raw = gesture_svc.predict_trained_gesture(bgr)
         if raw.get("gesture") == "—":
             raw = gesture_svc.detect_gesture_fast(bgr)

@@ -10,8 +10,10 @@ from training.predictor import GesturePredictor
 
 class GestureService:
     """
-    Same detect_gesture_fast logic as before.
-    Keeps mediapipe init/close in one place.
+    Backend service for live gesture recognition.
+
+    Initialises MediaPipe Hands, supports trained-model prediction,
+    and provides a rule-based fallback detector.
     """
 
     def __init__(self, gesture_small_width: int = 320) -> None:

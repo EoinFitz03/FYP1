@@ -8,7 +8,7 @@ import face_recognition # does face detection and encoding
 from db import Database  # Demo1/db.py
 # Import typing, image-processing, face-recognition, and database tools used for face matching
 
-class FaceService:  # Service responsible for loading known faces and recognising people from live frames (2)
+class FaceService:  # # Handles loading known faces and recognising people from live frames
 
 # Store face-recognition settings and prepare in-memory lists for known encodings and names (3)
     def __init__(self, db_path: str, tolerance: float, downscale: float, model: str) -> None:

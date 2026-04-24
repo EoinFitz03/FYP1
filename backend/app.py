@@ -35,7 +35,7 @@ from training.capture import TrainingState, try_capture_landmarks # stores train
 # saves gesture landmark data during training capture
 app = FastAPI()
 app.add_middleware(
-    CORSMiddleware, # is needed because frontend and backend run on different ports
+    CORSMiddleware, # is needed because frontend and backend run on different ports, allow them to talk
     allow_origins=["http://localhost:5173"],
     allow_credentials=True,
     allow_methods=["*"],
@@ -57,7 +57,7 @@ train_state = TrainingState() # Stores the current training capture session stat
 # gesture recognition service
 # enrolment service 
 def startup() -> None:
-    global face_svc, gesture_svc, enrol_svc
+    global face_svc, gesture_svc, enrol_svc 
 
     face_svc = FaceService( # Create face recognition service and load known face encodings from the database
         db_path=DB_PATH,
