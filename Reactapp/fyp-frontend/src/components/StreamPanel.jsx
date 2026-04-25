@@ -8,13 +8,36 @@ import "../styles/live.css";
 
 const STORAGE_KEY = "doorbell_recent_results";
 
-// Normalise gesture text so "ThumbsUp", "thumbs_up", "thumbs up" all match.
-const norm = (s) =>
-  String(s || "")
+// Normalise gesture text so "ThumbsUp", "thumbs_up", "thumb_up", "thumbs up" all match.
+const norm = (s) => {
+  const value = String(s || "")
     .trim()
     .toLowerCase()
     .replace(/\s+/g, "")
-    .replace(/_/g, "");
+    .replace(/_/g, "")
+    .replace(/-/g, "");
+
+  if (!value || value === "—" || value === "unknown") return "";
+
+  // Treat thumb_up and thumbs_up as the same gesture
+  if (value === "thumbup" || value === "thumbsup") return "thumbsup";
+
+  return value;
+};
+
+// Face must be recognised before gestures are allowed to control the door.
+const isFaceAccepted = (person) => {
+  const value = String(person || "").trim().toLowerCase();
+
+  if (!value) return false;
+  if (value === "unknown") return false;
+  if (value === "—") return false;
+  if (value === "no face") return false;
+  if (value === "no_face") return false;
+  if (value === "none") return false;
+
+  return true;
+};
 
 export default function StreamPanel({
   title,
@@ -151,36 +174,47 @@ export default function StreamPanel({
     if (!running) return;
     if (!result) return;
 
+    // New rule:
+    // The face must be recognised first.
+    // If the person is Unknown / no face / empty, the gesture is ignored.
+    const faceAccepted = isFaceAccepted(result.person);
+    if (!faceAccepted) return;
+
     const rawGesture = result.gesture ?? result.hand_gesture ?? "";
     const g = norm(rawGesture);
     if (!g) return;
 
-    if (doorTimeoutRef.current) {
-      clearTimeout(doorTimeoutRef.current);
-      doorTimeoutRef.current = null;
-    }
-
     const openKey = norm(openGesture);
     const closeKey = norm(closeGesture);
 
-    if (g === openKey) {
-      setDoorState("OPENING");
+    const startDoorTransition = (middleState, finalState) => {
+      if (doorTimeoutRef.current) {
+        clearTimeout(doorTimeoutRef.current);
+        doorTimeoutRef.current = null;
+      }
+
+      setDoorState(middleState);
+
       doorTimeoutRef.current = setTimeout(() => {
-        setDoorState("OPEN");
+        setDoorState(finalState);
         doorTimeoutRef.current = null;
       }, 700);
+    };
+
+    // Important fix:
+    // Before this, every thumbs_up frame restarted the 700ms timer.
+    // Now it only starts opening if the door is not already opening/open.
+    if (g === openKey && doorState !== "OPEN" && doorState !== "OPENING") {
+      startDoorTransition("OPENING", "OPEN");
       return;
     }
 
-    if (g === closeKey) {
-      setDoorState("CLOSING");
-      doorTimeoutRef.current = setTimeout(() => {
-        setDoorState("CLOSED");
-        doorTimeoutRef.current = null;
-      }, 700);
+    // Same fix for closing.
+    if (g === closeKey && doorState !== "CLOSED" && doorState !== "CLOSING") {
+      startDoorTransition("CLOSING", "CLOSED");
       return;
     }
-  }, [doorSim, running, result, openGesture, closeGesture]);
+  }, [doorSim, running, result, openGesture, closeGesture, doorState]);
 
   // Reset door when stopped
   useEffect(() => {
@@ -194,6 +228,16 @@ export default function StreamPanel({
       setDoorState("CLOSED");
     }
   }, [doorSim, running]);
+
+  // Clean up timer when leaving the page
+  useEffect(() => {
+    return () => {
+      if (doorTimeoutRef.current) {
+        clearTimeout(doorTimeoutRef.current);
+        doorTimeoutRef.current = null;
+      }
+    };
+  }, []);
 
   const start = () => {
     setErr("");
@@ -245,6 +289,8 @@ export default function StreamPanel({
     : trainStatus.finished
     ? `FINISHED: ${trainStatus.count}/${trainStatus.target}`
     : "NOT RECORDING";
+
+  const detectedGesture = result?.gesture ?? result?.hand_gesture ?? "—";
 
   return (
     <div className="gridTwoCol">
@@ -364,7 +410,7 @@ export default function StreamPanel({
 
             <div className="smallText" style={{ marginTop: 8, opacity: 0.85 }}>
               <div>
-                <b>Detected gesture:</b> {result?.gesture ?? result?.hand_gesture ?? "—"}
+                <b>Detected gesture:</b> {detectedGesture}
               </div>
               <div>
                 <b>thumbs_up</b> = Open
@@ -386,7 +432,7 @@ export default function StreamPanel({
               <b>Face conf:</b> {result?.face_conf ?? 0}
             </div>
             <div>
-              <b>Gesture:</b> {result?.gesture ?? "—"}
+              <b>Gesture:</b> {detectedGesture}
             </div>
             <div>
               <b>Gesture conf:</b> {result?.gesture_conf ?? 0}
